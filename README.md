@@ -60,6 +60,92 @@
 * Lots of data is time based, e.g. logs, tweets, etc. By creating an index per day (or week, month, …), we can efficiently limit searches to certain time ranges - and expunge old data. Remember, we cannot efficiently delete from an existing index, but deleting an entire index is cheap
 * When searches must be limited to a certain user (e.g. "search your messages"), it can be useful to route all the documents for that user to the same shard, to reduce the number of indexes that must be searched
 
+## Analyzers
+
+* By default, Elasticsearch uses the standard analyzer for all text analysis
+* Analyzer is: Zero or more character filters => A tokenizer => Zero or token filters
+* Tokenizers also record the order or relative positions of each term (used for phrase queries or word proximity queries), and the start and end character offsets of each term in the original text (used for highlighting search snippets)
+* Custome Analyzer input parameters:
+  * tokenizer - A built-in or customised tokenizer (Required)
+  * char_filter - An optional array of built-in or customised character filters
+  * filter - An optional array of built-in or customised token filters
+  * position_increment_gap - When indexing an array of text values, Elasticsearch inserts a fake "gap" between the last term of one value and the first term of the next value to ensure that a phrase query doesn’t match two terms from different array elements. Defaults to 100. See position_increment_gap for more
+* Standard Analyzer
+  * The standard analyzer divides text into terms on word boundaries, as defined by the Unicode Text Segmentation algorithm. It removes most punctuation, lowercases terms, and supports removing stop words.
+* Simple Analyzer
+  * The simple analyzer divides text into terms whenever it encounters a character which is not a letter. It lowercases all terms.
+* Whitespace Analyzer
+  * The whitespace analyzer divides text into terms whenever it encounters any whitespace character. It does not lowercase terms.
+* Stop Analyzer
+  * The stop analyzer is like the simple analyzer, but also supports removal of stop words.
+* Keyword Analyzer
+  * The keyword analyzer is a “noop” analyzer that accepts whatever text it is given and outputs the exact same text as a single term.
+* Pattern Analyzer
+  * The pattern analyzer uses a regular expression to split the text into terms. It supports lower-casing and stop words.
+* Language Analyzers
+  * Elasticsearch provides many language-specific analyzers like english or french.
+* Fingerprint Analyzer
+  * The fingerprint analyzer is a specialist analyzer which creates a fingerprint which can be used for duplicate detection
+* While Indexing a document, Elasticsearch determines which index-time analyzer to use by checking the following parameters in order:
+  * The analyzer mapping parameter of the field
+  ```
+  PUT my_index
+  {
+    "mappings": {
+      "properties": {
+        "title": {
+          "type":     "text",
+          "analyzer": "standard"
+        }
+      }
+    }
+  }
+  ```
+  * The default analyzer parameter in the index settings
+  ```
+  PUT my_index
+  {
+    "settings": {
+      "analysis": {
+        "analyzer": {
+          "default": {
+            "type": "whitespace"
+          }
+        }
+      }
+    }
+  }
+  ```
+  * If none of these parameters are specified, the standard analyzer is used
+* While searching a document, the analyzer to use to search a particular field is determined by looking for:
+  * An analyzer specified in the query itself
+  * The search_analyzer mapping parameter
+  * The analyzer mapping parameter
+  * An analyzer in the index settings called default_search
+  * An analyzer in the index settings called default
+  * The standard analyzer
+* Testing an analyzer
+  ```
+  POST _analyze
+  {
+    "analyzer": "whitespace",
+    "text":     "The quick brown fox."
+  }
+  ```
+* Testing using _analyze api with a combination of a tokenizer, zero or more character filters and zero or more token filters
+  ```
+  POST _analyze
+  {
+    "tokenizer": "standard",
+    "filter":  [ "lowercase", "asciifolding" ],
+    "text":      "Is this déja vu?" 
+  }
+  ```
+* Normalizers are similar to analyzers except that they may only emit a single token. As a consequence, they do not have a tokenizer and only accept a subset of the available char filters and token filters. Only the filters that work on a per-character basis are allowed
+* Character Filter - A character filter receives the original text as a stream of characters and can transform the stream by adding, removing, or changing characters
+* Token Filter - Token filters accept a stream of tokens from a tokenizer and can modify tokens (eg lowercasing), delete tokens (eg remove stopwords) or add tokens (eg synonyms)
+
+
 ## Key Parameters
 
 * `cluster.no_master_block` - Specifies which operations are rejected when there is no active master in a cluster. Possible values are `all` and `write`
