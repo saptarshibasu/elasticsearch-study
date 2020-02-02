@@ -144,6 +144,10 @@
 * Normalizers are similar to analyzers except that they may only emit a single token. As a consequence, they do not have a tokenizer and only accept a subset of the available char filters and token filters. Only the filters that work on a per-character basis are allowed
 * Character Filter - A character filter receives the original text as a stream of characters and can transform the stream by adding, removing, or changing characters
 * Token Filter - Token filters accept a stream of tokens from a tokenizer and can modify tokens (eg lowercasing), delete tokens (eg remove stopwords) or add tokens (eg synonyms)
+* Analyzer `standard` doesn't do stemmimg - "laughing", "foxes", "lazy" etc. will remain as is
+* Analyzer `standard` doesn't remove stop words unless configured explicitly using parameter `"stopwords": "_english_"`
+* Analyzer `english` does stemming and also removes stop words like "the", "an" etc.
+* Both `standard` and `english` analyzers have lower case token filter
 
 
 ## Key Parameters
@@ -198,11 +202,114 @@
 * Cross-cluster replication is active-passive. The index on the primary cluster is the active leader index and handles all write requests. Indices replicated to secondary clusters are read-only followers
 * Start elasticsearch
 ```
-./elasticsearch -Epath.data=data1 -Epath.logs=log1
-./elasticsearch -Epath.data=data2 -Epath.logs=log2
-./elasticsearch -Epath.data=data3 -Epath.logs=log3
+export ES_PATH_CONF=<location of config for node1>; ./elasticsearch
+export ES_PATH_CONF=<location of config for node2>; ./elasticsearch
+export ES_PATH_CONF=<location of config for node3>; ./elasticsearch
 ```
 * Replica shards must be available for the cluster status to be green. If the cluster status is red, some data is unavailable
+
+## Sample API Calls
+
+### Creating an Index
+
+```
+PUT /mytestindex
+{
+  "settings": {
+    "analysis": {
+      "analyzer": {
+        "phrase_analyzer": {
+          "tokenizer": "standard",
+          "filter": [
+            "filter_shingle",
+            "lowercase",
+            "english_stemmer"
+          ]
+        }
+      },
+      "filter": {
+        "filter_shingle": {
+          "type": "shingle",
+          "max_shingle_size": 3,
+          "min_shingle_size": 2
+        },
+        "english_stemmer" : {
+          "type" : "stemmer",
+          "name" : "english"
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "notes": {
+        "type": "text",
+        "analyzer": "english",
+        "fields": {
+          "phrase": {
+            "type": "text",
+            "analyzer": "phrase_analyzer"
+          }
+        }
+      },
+      "name": {
+        "type": "text"
+      },
+      "name_completion": {
+        "type": "completion"
+      },
+      "billgroup": {
+        "type": "integer"
+      }
+    }
+  }
+}
+```
+
+* The bulk request must have a new line at the end
+* The meta data has to be in one line
+* Each document data has to be in one line
+* Every document data has to be preceded by the meta data
+* It should be noted that the body of a bulk request is not a valid JSON document. The individual lines are not separated by comma (,)
+
+```
+{ "create": { "_index": "mytestindex", "_id": "1"}} 
+{ "name": "Saptarshi Basu", "name_completion": ["Saptarshi Basu", "Basu, Saptarshi", "Saptarshi", "Basu"], "notes": "When I hear you give your reason, I remarked, it always appears to me to be so ridiculously simple that I could always do it myself", "billgroup": "1110345265"}
+{ "create": { "_index": "mytestindex", "_id": "2"}} 
+{ "name": "Manasa Mahakud", "name_completion": ["Manasa Mahakud", "Mahakud, Manasa", "Manasa", "Mahakud"], "notes": "At each successive instance of your reasoning, I'm baffled until you explain the process and yet I believe my eyes are as good as yours", "billgroup": "1345281112"}
+{ "create": { "_index": "mytestindex", "_id": "3"}} 
+{ "name": "Sayantan Biswas",  "name_completion": ["Sayantan Biswas", "Biswas, Sayantan", "Sayantan", "Biswas"],  "notes": "Smile, an everlasting smile, a smile can bring a tear to me. You think that I don't even mean a single word I say. It's only words and words are all I have to take your hear away", "billgroup": "1110345265"}
+{ "create": { "_index": "mytestindex", "_id": "4"}} 
+{ "name": "Reshmi Raju", "name_completion": ["Reshmi Raju", "Raju, Reshmi", "Reshmi", "Raju"], "notes": "When the bough breaks, the craddle will fall and it has fallen here. Makers of man, creators of leader, be careful what kind of leaders you are producing here, because I see you are killing the very spirit this institution proclaims it instills", "billgroup": "1211346576"}
+
+```
+
+```
+{
+  "suggest": {
+    "text" : "Sa",
+    "my-suggest-1" : {
+      "completion" : {
+        "field" : "name_completion",
+        "fuzzy": {
+          "fuzziness": 1
+        }
+      }
+    }
+  }
+}
+```
+
+```
+POST /mytestindex/_search
+{
+  "query": {
+    "match_phrase": {
+      "notes": "When I hear you give your reasons"
+    }
+  }
+}
+```
 
 ## References
 
