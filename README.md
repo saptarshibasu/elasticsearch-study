@@ -1,6 +1,6 @@
 # Elasticsearch
 
-## Basics
+## Architecture
 
 * Distributed schema-less JSON document store
 * Each node may play one or more of the following roles
@@ -38,25 +38,43 @@
 * If the elected master detects that a node has disconnected, however, this situation is treated as an immediate failure. The master bypasses the timeout and retry setting values and attempts to remove the node from the cluster
 * Similarly, if a node detects that the elected master has disconnected, this situation is treated as an immediate failure. The node bypasses the timeout and retry settings and restarts its discovery phase to try and find or elect a new master
 * For the cluster to be fully operational, it must have one active master
-
-
 * Elasticsearch does not have transactions
-* All index and delete operations are written to the translog pr transaction log after being processed by the internal Lucene index but before they are acknowledged
+* All index and delete operations are written to the translog or transaction log after being processed by the internal Lucene index but before they are acknowledged
 * Lucene commit is not invoked after every write operation. It is invoked periodically in the background. Therefore in case of a crash, the lucene changes since the last commit are replayed from the translog
 * After every Lucene commit, a new translog is started
-* By default, `index.translog.durability` is set to request meaning that Elasticsearch will only report success of an index, delete, update, or bulk request to the client after the translog has been successfully fsynced and committed on the primary and on every allocated replica. If `index.translog.durability` is set to async then Elasticsearch fsyncs and commits the translog only every `index.translog.sync_interval` which means that any operations that were performed just before a crash may be lost when the node recovers
-
+* By default, `index.translog.durability` is set to `request` meaning that Elasticsearch will only report success of an index, delete, update, or bulk request to the client after the translog has been successfully fsynced and committed on the primary and on every allocated replica. If `index.translog.durability` is set to `async` then Elasticsearch fsyncs and commits the translog only every `index.translog.sync_interval` which means that any operations that were performed just before a crash may be lost when the node recovers
 * Text fields are stored in inverted indices, and numeric and geo fields are stored in BKD trees
 * Each index in Elasticsearch is divided into shards and each shard can have multiple replicas (replication group)
 * Elasticsearch’s data replication model is based on the primary-backup model
-* Each replication group has one primary shared and one or more replica shards
+* Each replication group has one primary shard and one or more replica shards
 * The primary shard serves as the main entry point for all indexing operations. It is in charge of validating them and making sure they are correct. Once an index operation has been accepted by the primary, the primary is also responsible for replicating the operation to the other copies
 * A "shard" is the basic scaling unit for Elasticsearch
 * The number of shards is specified at index creation time, and cannot be changed later on
 * An Elasticsearch index is made up of one or more shards, which can have zero or more replicas
 * Each shard is a Lucene index
 * A Lucene index is made up of one or more immutable index segments
-* To keep the number of segments manageable, Lucene occasionally merges segments according to some merge policy as new segments are added
+* As data is written to a shard, it is periodically published into new immutable Lucene segments on disk, and it is at this time it becomes available for querying. This is referred to as a refresh
+* As the number of segments grow, these are periodically consolidated into larger segments. This process is referred to as merging
+* As all segments are immutable, this means that the disk space used will typically fluctuate during indexing, as new, merged segments need to be created before the ones they replace can be deleted. Merging can be quite resource intensive, especially with respect to disk I/O
+* The shard is the unit at which Elasticsearch distributes data around the cluster. The speed at which Elasticsearch can move shards around when rebalancing data, e.g. following a failure, will depend on the size and number of shards as well as network and disk performance
+* Avoid having very large shards as this can negatively affect the cluster's ability to recover from failure. There is no fixed limit on how large shards can be, but a shard size of 50GB is often quoted as a limit that has been seen to work for a variety of use-cases
+* As segments are immutable, updating a document requires Elasticsearch to first find the existing document, then mark it as deleted and add the updated version. Deleting a document also requires the document to be found and marked as deleted
+* For this reason, deleted documents will continue to tie up disk space and some system resources until they are merged out, which can consume a lot of system resources
+* Try to use time-based indices for managing data retention whenever possible. Group data into indices based on the retention period. Time-based indices also make it easy to vary the number of primary shards and replicas over time, as this can be changed for the next index to be generated. This simplifies adapting to changing data volumes and requirements
+* For each Elasticsearch index, information about mappings and state is stored in the cluster state. This is kept in memory for fast access. Having a large number of indices and shards in a cluster can therefore result in a large cluster state, especially if mappings are large
+* In order to reduce the number of indices and avoid large and sprawling mappings, consider storing data with similar structure in the same index rather than splitting into separate indices based on where the data comes from
+* The cluster state is loaded into the heap on every node (including the masters)
+* Each shard has data that need to be kept in memory and use heap space. This includes data structures holding information at the shard level, but also at the segment level in order to define where data reside on disk. The size of these data structures is not fixed and will vary depending on the use-case
+* Small shards result in small segments, which increases overhead. Aim to keep the average shard size between at least a few GB and a few tens of GB. For use-cases with time-based data, it is common to see shards between 20GB and 40GB in size
+* As the overhead per shard depends on the segment count and size, forcing smaller segments to merge into larger ones through a forcemerge operation can reduce overhead and improve query performance. This should ideally be done once no more data is written to the index. Be aware that this is an expensive operation that should ideally be performed during off-peak hours
+* A good rule-of-thumb is to ensure you keep the number of shards per node below 20 per GB heap it has configured. A node with a 30GB heap should therefore have a maximum of 600 shards, but the further below this limit you can keep it the better
+* In Elasticsearch, each query is executed in a single thread per shard. Multiple shards can however be processed in parallel, as can multiple queries and aggregations against the same shard
+* Querying lots of small shards will make the processing per shard faster, but as many more tasks need to be queued up and processed in sequence, it is not necessarily going to be faster than querying a smaller number of larger shards
+* If using time-based indices covering a fixed period, adjust the period each index covers based on the retention period and expected data volumes in order to reach the target shard size
+* If the data volume is not uniform to warrant a fixed period time-based index, rollover and shrink indexes can be used
+* The rollover index API makes it possible to specify the number of documents an index should contain and/or the maximum period documents should be written to it. Once one of these criteria has been exceeded, Elasticsearch can trigger a new index to be created for writing without downtime
+* If you have time-based, immutable data where volumes can vary significantly over time, consider using the rollover index API to achieve an optimal target shard size by dynamically varying the time-period each index covers. This gives great flexibility and can help avoid having too large or too small shards when volumes are unpredictable
+* If you need to have each index cover a specific time period but still want to be able to spread indexing out across a large number of nodes, consider using the shrink API to reduce the number of primary shards once the index is no longer indexed into. This API can also be used to reduce the number of shards in case you have initially configured too many shards
 * Lots of data is time based, e.g. logs, tweets, etc. By creating an index per day (or week, month, …), we can efficiently limit searches to certain time ranges - and expunge old data. Remember, we cannot efficiently delete from an existing index, but deleting an entire index is cheap
 * When searches must be limited to a certain user (e.g. "search your messages"), it can be useful to route all the documents for that user to the same shard, to reduce the number of indexes that must be searched
 
@@ -154,7 +172,7 @@
 
 * `cluster.no_master_block` - Specifies which operations are rejected when there is no active master in a cluster. Possible values are `all` and `write`
 * `cluster.routing.allocation.enable` - Enable or disable allocation for specific kinds of shards in the node - `all`, `primaries`, `new_primaries` and `none`
-* 
+ 
 
 ## Write Model
 
@@ -207,6 +225,21 @@ export ES_PATH_CONF=<location of config for node2>; ./elasticsearch
 export ES_PATH_CONF=<location of config for node3>; ./elasticsearch
 ```
 * Replica shards must be available for the cluster status to be green. If the cluster status is red, some data is unavailable
+
+## Operations
+
+* The number of shards **cannot** be changed once the index is created
+* The mappings **cannot** be changed once the index is created
+* The number of replicas **can** be changed even after the index is created. The same request can be used to change other index settings
+  ```
+  PUT /<index_name>/_settings
+  {
+    "index" : {
+        "number_of_replicas" : 2
+    }
+  }
+  ```
+*
 
 ## Sample API Calls
 
@@ -266,6 +299,31 @@ PUT /mytestindex
 }
 ```
 
+```
+{
+  "suggest": {
+    "text": "I hear you gvei yourreason",
+    "my-suggest-1": {
+      "phrase": {
+        "field": "notes.phrase",
+        "direct_generator": [
+          {
+            "field": "notes.phrase",
+            "suggest_mode": "always"
+          },
+          {
+            "field": "notes.reverse",
+            "suggest_mode": "always",
+            "pre_filter": "reverse_analyzer",
+            "post_filter": "reverse_analyzer"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
 * The bulk request must have a new line at the end
 * The meta data has to be in one line
 * Each document data has to be in one line
@@ -293,7 +351,8 @@ PUT /mytestindex
         "field" : "name_completion",
         "fuzzy": {
           "fuzziness": 1
-        }
+        },
+        "skip_duplicates": "true"
       }
     }
   }
@@ -304,8 +363,12 @@ PUT /mytestindex
 POST /mytestindex/_search
 {
   "query": {
-    "match_phrase": {
-      "notes": "When I hear you give your reasons"
+    "match": {
+      "notes.phrase": {
+        "query": "smile a everlasting",
+        "operator" : "and",
+        "fuzziness": "AUTO"
+      }
     }
   }
 }
