@@ -1,31 +1,45 @@
 # Elasticsearch
 
-## Architecture
+version - 7.8
+
+## Basic
 
 * Distributed schema-less JSON document store
+* By default, Elasticsearch indexes all data in every field
+* Each indexed field has a dedicated, optimized data structure
+* Elasticsearch does not have transactions
+
+## Architecture
+
 * Each node may play one or more of the following roles
-  * Master-eligible node
-  * Voting-only node
-  * Data node
-  * Ingest node
-  * ML node
-  * Co-ordinating node (cannot be disabled)
+  * **Master-eligible node** - `node.master: true` - A master eligible node may be elected to become the master node by the master election process. The master node is responsible for lightweight cluster-wide actions such as creating or deleting an index, tracking which nodes are part of the cluster, and deciding which shards to allocate to which nodes
+  * **Voting-only node** - `node.voting_only: true` - It can participate in the master election process. Although it will also have `node.master` set to true due to historical reasons, it cannot be a master node itself
+  * **Data node** - `node.data: true` - Data nodes hold the shards that contain the documents you have indexed. Data nodes handle data related operations like CRUD, search, and aggregations
+  * **Ingest node** - The ingest node intercepts bulk and index requests, it applies transformations, and it then passes the documents back to the index or bulk APIs
+    * To pre-process documents before indexing, define a pipeline that specifies a series of processors
+    * Each processor transforms the document in some specific way. For example, a pipeline might have one processor that removes a field from the document, followed by another processor that renames a field
+    * The cluster state then stores the configured pipelines
+    * To use a pipeline, simply specify the pipeline parameter on an index or bulk request
+    * An index may also declare a default pipeline that will be used in the absence of the pipeline parameter
+    * Finally, an index may also declare a final pipeline that will be executed after any request or default pipeline (if any)
+  * ML node - Machine learning features
+  * **Co-ordinating node (cannot be disabled)** - Every node can act as a co-ordinating node which scatters the client request to appropriate node/s and assemmble the response from all nodes before returning to the client
 * By default each node is eligible to play any of the roles
 * However, in large clusters, some nodes play a dedicated role
 * High availability (HA) clusters require at least three master-eligible nodes, at least two of which are not voting-only nodes. Such a cluster will be able to elect a master node even if one of the nodes fails
 * Role of master node
   * Maintain the global cluster state
   * Reassign shards when nodes join or leave the cluster
-* On startup, nodes discover master nodes by connecting to the seed nodes configured in its `elasticsearch.yml`, verifying if they are master eligible and sharing the details of its known master-eligible peers
-* If the node itself is not master-eligible then it continues this discovery process until it has discovered an elected master node
-* If the node itself is master-eligible then it continues this discovery process until it has either discovered an elected master node or else it has discovered enough masterless master-eligible nodes to complete an election
-* If neither of these occur quickly enough then the node will retry after `discovery.find_peers_interval` which defaults to 1s
 * Only the master node is allowed to update the metadata representing the state of the whole cluster - cluster state
 * Cluster state includes information such as
   * The set of nodes in the cluster
   * All cluster-level settings
   * Information about the indices in the cluster, including their mappings and settings
   * The locations of all the shards in the cluster
+* On startup, nodes discover master nodes by connecting to the seed nodes configured in its `elasticsearch.yml`, verifying if they are master eligible and sharing the details of its known master-eligible peers
+* If the node itself is not master-eligible then it continues this discovery process until it has discovered an elected master node
+* If the node itself is master-eligible then it continues this discovery process until it has either discovered an elected master node or else it has discovered enough masterless master-eligible nodes to complete an election
+* If neither of these occur quickly enough then the node will retry after `discovery.find_peers_interval` which defaults to 1s
 * The master node processes one batch of cluster state updates at a time, computing the required changes and publishing the updated cluster state to all the other nodes in the cluster
 * Once the master has collected acknowledgements from enough master-eligible nodes, the new cluster state is said to be committed and the master broadcasts another message instructing nodes to apply the now-committed state
 * Master node waits for `cluster.publish.timeout` (default 30s) for the cluster state to be committed. If this time is reached before the new cluster state is committed then the cluster state change is rejected and the master considers itself to have failed. It stands down and starts trying to elect a new master
@@ -38,8 +52,7 @@
 * If the elected master detects that a node has disconnected, however, this situation is treated as an immediate failure. The master bypasses the timeout and retry setting values and attempts to remove the node from the cluster
 * Similarly, if a node detects that the elected master has disconnected, this situation is treated as an immediate failure. The node bypasses the timeout and retry settings and restarts its discovery phase to try and find or elect a new master
 * For the cluster to be fully operational, it must have one active master
-* Elasticsearch does not have transactions
-* All index and delete operations are written to the translog or transaction log after being processed by the internal Lucene index but before they are acknowledged
+* All index and delete operations are written to the `translog` or `transaction log` after being processed by the internal Lucene index but before they are acknowledged
 * Lucene commit is not invoked after every write operation. It is invoked periodically in the background. Therefore in case of a crash, the lucene changes since the last commit are replayed from the translog
 * After every Lucene commit, a new translog is started
 * By default, `index.translog.durability` is set to `request` meaning that Elasticsearch will only report success of an index, delete, update, or bulk request to the client after the translog has been successfully fsynced and committed on the primary and on every allocated replica. If `index.translog.durability` is set to `async` then Elasticsearch fsyncs and commits the translog only every `index.translog.sync_interval` which means that any operations that were performed just before a crash may be lost when the node recovers
@@ -48,7 +61,7 @@
 * Elasticsearch’s data replication model is based on the primary-backup model
 * Each replication group has one primary shard and one or more replica shards
 * The primary shard serves as the main entry point for all indexing operations. It is in charge of validating them and making sure they are correct. Once an index operation has been accepted by the primary, the primary is also responsible for replicating the operation to the other copies
-* A "shard" is the basic scaling unit for Elasticsearch
+* A `shard` is the basic scaling unit for Elasticsearch
 * The number of shards is specified at index creation time, and cannot be changed later on
 * An Elasticsearch index is made up of one or more shards, which can have zero or more replicas
 * Each shard is a Lucene index
@@ -77,6 +90,31 @@
 * If you need to have each index cover a specific time period but still want to be able to spread indexing out across a large number of nodes, consider using the shrink API to reduce the number of primary shards once the index is no longer indexed into. This API can also be used to reduce the number of shards in case you have initially configured too many shards
 * Lots of data is time based, e.g. logs, tweets, etc. By creating an index per day (or week, month, …), we can efficiently limit searches to certain time ranges - and expunge old data. Remember, we cannot efficiently delete from an existing index, but deleting an entire index is cheap
 * When searches must be limited to a certain user (e.g. "search your messages"), it can be useful to route all the documents for that user to the same shard, to reduce the number of indexes that must be searched
+* A document is routed to a particular shard in an index using the following formula: `shard_num = hash(_routing) % num_primary_shards`. The default value used for `_routing` is the document’s `_id`
+* Custom routing patterns can be implemented by specifying a custom routing value per document
+* Forgetting the routing value can lead to a document being indexed on more than one shard. As a safeguard, the _routing field can be configured (in mapping) to make a custom routing value required for all CRUD operations
+* When indexing documents specifying a custom _routing, the uniqueness of the _id is not guaranteed across all of the shards in the index. In fact, documents with the same _id might end up on different shards if indexed with different _routing values. It is up to the user to ensure that IDs are unique across the index
+
+## Mapping
+
+* Mapping is the process of defining how a document, and the fields it contains, are stored and indexed
+* Mapping definition has
+  * Metadata Fields
+  * Fields or Properties
+* Types of Metadata fields
+  * **Identity metadata fields** - _index, _type, _id
+  * **Document source metadata fields** - _source, _size
+  * **Indexing metadata fields** - _field_names, _ignored
+  * **Routing metadata field** - _routing
+  * **Other metadata field** - _meta
+* _index
+  * contains the name of the index
+  * When performing queries across multiple indexes, it can be used to query for a document in a select few indexes
+* _id
+  * Each document has an _id that uniquely identifies it, which is indexed
+* _ignored
+  * The _ignored field indexes and stores the names of every field in a document that has been ignored because it was malformed and ignore_malformed was turned on
+  * used to index the names of every field in a document that contains any value other than null. This field was used by the exists query to find documents that either have or don’t have any non-null value for a particular field
 
 ## Analyzers
 
@@ -201,8 +239,6 @@
 * Combine the results and respond. Note that in the case of get by ID look up, only one shard is relevant and this step can be skipped
 
 
-* By default, Elasticsearch indexes all data in every field
-* Each indexed field has a dedicated, optimized data structure
 * When dynamic mapping is enabled, Elasticsearch automatically detects and adds new fields to the index mapping them to the appropriate Elasticsearch datatypes
 * It’s often useful to index the same field in different ways for different purposes. For example, you might want to index a string field as both a text field for full-text search and as a keyword field for sorting or aggregating your data. Or, you might choose to use more than one language analyzer to process the contents of a string field that contains user input
 * The analysis chain that is applied to a full-text field during indexing is also used at search time. When you query a full-text field, the query text undergoes the same analysis before the terms are looked up in the index
