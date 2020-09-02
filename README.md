@@ -90,10 +90,6 @@ version - 7.8
 * If you need to have each index cover a specific time period but still want to be able to spread indexing out across a large number of nodes, consider using the shrink API to reduce the number of primary shards once the index is no longer indexed into. This API can also be used to reduce the number of shards in case you have initially configured too many shards
 * Lots of data is time based, e.g. logs, tweets, etc. By creating an index per day (or week, month, …), we can efficiently limit searches to certain time ranges - and expunge old data. Remember, we cannot efficiently delete from an existing index, but deleting an entire index is cheap
 * When searches must be limited to a certain user (e.g. "search your messages"), it can be useful to route all the documents for that user to the same shard, to reduce the number of indexes that must be searched
-* A document is routed to a particular shard in an index using the following formula: `shard_num = hash(_routing) % num_primary_shards`. The default value used for `_routing` is the document’s `_id`
-* Custom routing patterns can be implemented by specifying a custom routing value per document
-* Forgetting the routing value can lead to a document being indexed on more than one shard. As a safeguard, the _routing field can be configured (in mapping) to make a custom routing value required for all CRUD operations
-* When indexing documents specifying a custom _routing, the uniqueness of the _id is not guaranteed across all of the shards in the index. In fact, documents with the same _id might end up on different shards if indexed with different _routing values. It is up to the user to ensure that IDs are unique across the index
 
 ## Mapping
 
@@ -102,19 +98,133 @@ version - 7.8
   * Metadata Fields
   * Fields or Properties
 * Types of Metadata fields
-  * **Identity metadata fields** - _index, _type, _id
+  * **Identity metadata fields** - _index, _id
   * **Document source metadata fields** - _source, _size
   * **Indexing metadata fields** - _field_names, _ignored
   * **Routing metadata field** - _routing
   * **Other metadata field** - _meta
-* _index
+* **_index**
   * contains the name of the index
   * When performing queries across multiple indexes, it can be used to query for a document in a select few indexes
-* _id
+* **_id**
   * Each document has an _id that uniquely identifies it, which is indexed
-* _ignored
+* **_source**
+  * The _source field contains the original JSON document body that was passed at index time. The _source field itself is not indexed (and thus is not searchable), but it is stored so that it can be returned when executing fetch requests, like get or search
+* **_size**
+  * The mapper-size plugin provides the _size metadata field which, when enabled, indexes the size in bytes of the original _source field
+* **_field_names**
+  * _field_names field only indexes the names of fields that have doc_values and norms disabled and it is used in `exists` query
+  * For fields which have either `doc_values` or `norm` enabled the exists query will still be available but will not use the _field_names field
+* **_ignored**
   * The _ignored field indexes and stores the names of every field in a document that has been ignored because it was malformed and ignore_malformed was turned on
   * used to index the names of every field in a document that contains any value other than null. This field was used by the exists query to find documents that either have or don’t have any non-null value for a particular field
+* **_routing**
+  * A document is routed to a particular shard in an index using the following formula: `shard_num = hash(_routing) % num_primary_shards`. The default value used for `_routing` is the document’s `_id`
+  * Custom routing patterns can be implemented by specifying a custom routing value per document
+  * Forgetting the routing value can lead to a document being indexed on more than one shard. As a safeguard, the `_routing` field can be configured (in mapping) to make a custom routing value required for all CRUD operations
+  * When indexing documents specifying a custom `_routing`, the uniqueness of the _id is not guaranteed across all of the shards in the index. In fact, documents with the same `_id` might end up on different shards if indexed with different `_routing` values. It is up to the user to ensure that IDs are unique across the index
+* **_meta**
+  * Not used at all by Elasticsearch, but can be used to store application-specific metadata
+
+**Mapping Parameters**  
+* **doc_values**
+  * Sorting, aggregations, and access to field values in scripts requires a different data access pattern. Instead of looking up the term and finding documents, we need to be able to look up the document and find the terms that it has in a field
+  * Doc values are the on-disk data structure, built at document index time, which makes this data access pattern possible
+  * They store the same values as the `_source` but in a column-oriented fashion that is way more efficient for sorting and aggregations
+  * Doc values are supported on almost all field types, with the notable exception of `text` and `annotated_text` fields
+  * All fields which support doc values have them enabled by default
+  * If you are sure that you don’t need to sort or aggregate on a field, or access the field value from a script, you can disable doc values in order to save disk space
+  * If only a few fields need to be read instead of the entire document from `_source`, it may be performant to read the values from `doc_values`
+  * `doc_values` store the multi-values fields as a sorted set - removing duplicates
+* **norms**
+  * Norms store various normalization factors that are later used at query time in order to compute the score of a document relatively to a query
+  * Although useful for scoring, norms also require quite a lot of disk
+  * If you don’t need scoring on a specific field, you should disable norms on that field. In particular, this is the case for fields that are used solely for filtering or aggregations
+* **null_value**
+  * A null value cannot be indexed or searched
+  * When a field is set to null, (or an empty array or an array of null values) it is treated as though that field has no values
+  * The null_value parameter allows you to replace explicit null values with the specified value so that it can be indexed and searched
+  * An empty array does not contain an explicit null, and so won’t be replaced with the null_value
+  * The null_value only influences how data is indexed, it doesn’t modify the _source document
+* **stored**
+  * By default fields of a document are indexed but not stored. The input document is stored as is in the `_source` field
+  * When only a few fields need to be read instead of the entire document from _source, it might be performant to store certain fields
+  * `stored` stores the fields in a row oriented format in contrsat with `doc_values`
+  * `stored` stores the multi-values fields as is
+* **similarity**
+  * Used to configure a scoring algorithm for a given field. Possible values are: BM25 (default), classic (TF/IDF), boolean
+* **analyzer**, **search_analyzer**, **search_quote_analyzer**
+  * Supported only for `text` fields
+  * `analyzer` - Specifies the analyzer used for text analysis when indexing or searching a text field
+  * `search_analyzer` - Specifies the analyzer used for text analysis when searching a text field (if not specified `analyzer` value will be used)
+  * `search_quote_analyzer` - Specifies the analyzer used for text analysis when phrase searching a text field (if not specified `search_analyzer` or `analyzer` value will be used)
+* **coerce**
+  * Default value is 'true'
+  * Can be disabled at field or index leel
+  * Used to force convert the input field value to the declared data type. For e.g. if the type is `int` and the incoming value is `"5"`, it will be converted to `5`
+* **copy_to**
+  * The `copy_to` parameter allows you to copy the values of multiple fields into a group field, which can then be queried as a single field
+  * For example, the first_name and last_name fields can be copied to the full_name
+  * The original `_source` field will not be modified to show the copied values
+  * You cannot copy recursively via intermediary fields such as a `copy_to` on field_1 to field_2 and `copy_to` on field_2 to field_3
+* **dynamic**
+  * Controls whether new fields can be added dynamically or not
+  * Possible values: 
+    * `true` - (default) Newly detected fields are added to the mapping
+    * `false` - Newly detected fields are ignored. These fields will not be indexed so will not be searchable but will still appear in the _source field of returned hits. These fields will not be added to the mapping, new fields must be added explicitly
+    * `strict` - If new fields are detected, an exception is thrown and the document is rejected. New fields must be explicitly added to the mapping
+* **enabled**
+  * `false` value causes Elasticsearch to skip parsing of the contents of the field entirely. The JSON can still be retrieved from the _source field, but it is not searchable or stored in any other way
+  * Can be applied only to the top-level mapping definition and to object fields
+  * Default value is `true`
+* **fields**
+  * Known as multi-fields
+  * Useful for indexing the same field in multiple ways (different types or diferent analyzers)
+  * The search can be directed to improve the score by using both fields
+  * The `_source` field won't contain the additional field details
+* **format**
+  * Formats dates
+* **ignore_above**
+  * Strings longer than the `ignore_above` setting will not be indexed or stored
+  * All strings/array elements will still be present in the `_source` field
+  * This option is also useful for protecting against Lucene’s term byte-length limit of 32766
+  * The value for ignore_above is the character count, but Lucene counts bytes. If you use UTF-8 text with many non-ASCII characters, you may want to set the limit to 32766 / 4 = 8191 since UTF-8 characters may occupy at most 4 bytes
+* **ignore_malformd**
+  * If set to true, allows the exception due to wrong data type to be ignored
+  * The malformed field is not indexed, but other fields in the document are processed normally
+  * It is recomended to check how many documents have malformed fields by using exists,term or terms queries on the special `_ignored` field
+  * Not supported for nested, object and range data types
+  * Not supported for JSON
+* **index_options**
+  * Controls what information is added to the inverted index for search and highlighting purposes
+  * Possible values
+    * `docs` - Only the doc number is indexed. Can answer the question Does this term exist in this field?
+    * `freqs` - Doc number and term frequencies are indexed. Term frequencies are used to score repeated terms higher than single terms
+    * `positions` (default) - Doc number, term frequencies, and term positions (or order) are indexed. Positions can be used for proximity or phrase queries
+    * `offsets` - Doc number, term frequencies, positions, and start and end character offsets (which map the term back to the original string) are indexed. Offsets are used by the unified highlighter to speed up highlighting
+* **index_phrases** 
+  * If enabled, two-term word combinations (shingles) are indexed into a separate field
+  * This allows exact phrase queries (no slop) to run more efficiently, at the expense of a larger index
+  * Note that this works best when stopwords are not removed
+  * Default value is `false`
+* **index_prefixes**
+  * Enables the indexing of term prefixes to speed up prefix searches. It accepts the following optional settings
+    * `min_chars` - The minimum prefix length to index. Must be greater than 0, and defaults to 2. The value is inclusive
+    * `max_chars` - The maximum prefix length to index. Must be less than 20, and defaults to 5. The value is inclusive
+* **index**
+  * Controls whether field values are indexed
+  * Accepts true or false and defaults to true
+  * Fields that are not indexed are not queryable
+* **meta**
+  * Available at field level
+  * Opaque to Elasticsearch
+* **normalizer**
+  * Similar to analyzer except that it guarantees that the analysis chain produces a single token
+  * e.g. lowercase
+* **position_increment_gap**
+  * When indexing text fields with multiple values a "fake" gap is added between the values to prevent most phrase queries from matching across the values
+  * The size of this gap is configured using position_increment_gap and defaults to 100
+  * E.g. Prevent matching "Abraham Lincoln" with the values [ "John Abraham", "Lincoln Smith"]
 
 ## Analyzers
 
